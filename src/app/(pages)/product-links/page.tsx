@@ -12,6 +12,7 @@ import {
   Wand2,
   X,
   AlertTriangle,
+  ChevronDown,
 } from 'lucide-react';
 
 /* ---------- types ---------- */
@@ -22,7 +23,10 @@ interface EposProduct {
   description: string;
   salePrice: number;
   costPrice: number;
+  sku: string;
   barcode: string;
+  orderCode: string;
+  articleCode: string;
   categoryId: number | null;
 }
 
@@ -36,6 +40,8 @@ interface WooProduct {
   stockStatus: string;
   type: string;
   status: string;
+  parentId: number | null;
+  parentName: string | null;
 }
 
 interface Mapping {
@@ -47,7 +53,7 @@ interface Mapping {
   last_synced: string | null;
 }
 
-type LinkStatus = 'linked' | 'to-save' | 'to-unlink' | 'not-linked';
+type LinkStatus = 'linked' | 'to-save' | 'to-unlink' | 'not-linked' | 'linked-not-found';
 
 interface PendingLink {
   wooId: number;
@@ -56,6 +62,24 @@ interface PendingLink {
   wooName: string;
   status: LinkStatus;
 }
+
+/* ---------- auto-match criteria (mirrors Slynk) ---------- */
+
+interface AutoMatchOption {
+  label: string;
+  value: string;
+  wooKey: keyof WooProduct;
+  eposKey: keyof EposProduct;
+}
+
+const AUTO_MATCH_OPTIONS: AutoMatchOption[] = [
+  { label: 'SKU ↔ Barcode', value: 'sku|barcode', wooKey: 'sku', eposKey: 'barcode' },
+  { label: 'SKU ↔ SKU', value: 'sku|sku', wooKey: 'sku', eposKey: 'sku' },
+  { label: 'SKU ↔ Order Code', value: 'sku|orderCode', wooKey: 'sku', eposKey: 'orderCode' },
+  { label: 'SKU ↔ Article Code', value: 'sku|articleCode', wooKey: 'sku', eposKey: 'articleCode' },
+  { label: 'SKU ↔ ePOS ID', value: 'sku|id', wooKey: 'sku', eposKey: 'id' },
+  { label: 'Name ↔ Name', value: 'name|name', wooKey: 'name', eposKey: 'name' },
+];
 
 /* ---------- helpers ---------- */
 
@@ -75,6 +99,8 @@ function StatusBadge({ status }: { status: LinkStatus }) {
       return <Badge color="bg-cyan-100 text-cyan-700">To Save</Badge>;
     case 'to-unlink':
       return <Badge color="bg-yellow-100 text-yellow-700">To Unlink</Badge>;
+    case 'linked-not-found':
+      return <Badge color="bg-red-100 text-red-700">Not Found</Badge>;
     default:
       return <Badge color="bg-slate-100 text-slate-500">Not Linked</Badge>;
   }
@@ -106,6 +132,14 @@ export default function ProductLinksPage() {
   const [searchWoo, setSearchWoo] = useState('');
   const [selectedEpos, setSelectedEpos] = useState<EposProduct | null>(null);
   const [filterLinked, setFilterLinked] = useState<'all' | 'linked' | 'unlinked'>('all');
+  const [showAutoMatchMenu, setShowAutoMatchMenu] = useState(false);
+  const [showOverwriteDialog, setShowOverwriteDialog] = useState<AutoMatchOption | null>(null);
+
+  // Sorting state
+  const [eposSortCol, setEposSortCol] = useState<keyof EposProduct>('name');
+  const [eposSortDir, setEposSortDir] = useState<'asc' | 'desc'>('asc');
+  const [wooSortCol, setWooSortCol] = useState<keyof WooProduct>('name');
+  const [wooSortDir, setWooSortDir] = useState<'asc' | 'desc'>('asc');
 
   // derived lookups
   const mappedEposIds = useMemo(() => {
@@ -120,14 +154,8 @@ export default function ProductLinksPage() {
     return map;
   }, [mappings]);
 
-  const eposToWoo = useMemo(() => {
-    const map = new Map<string, number>();
-    mappings.forEach((m) => map.set(m.epos_id, m.woo_id));
-    Object.values(pendingLinks).forEach((p) => map.set(String(p.eposId), p.wooId));
-    return map;
-  }, [mappings, pendingLinks]);
-
   const hasUnsavedChanges = Object.keys(pendingLinks).length > 0 || Object.keys(pendingUnlinks).length > 0;
+  const pendingCount = Object.keys(pendingLinks).length + Object.keys(pendingUnlinks).length;
 
   /* ---------- fetchers ---------- */
 
@@ -188,26 +216,36 @@ export default function ProductLinksPage() {
     return () => window.removeEventListener('beforeunload', handler);
   }, [hasUnsavedChanges]);
 
+  // Close auto-match menu on outside click
+  useEffect(() => {
+    if (!showAutoMatchMenu) return;
+    const handler = () => setShowAutoMatchMenu(false);
+    document.addEventListener('click', handler);
+    return () => document.removeEventListener('click', handler);
+  }, [showAutoMatchMenu]);
+
   /* ---------- link status for a WooCommerce product ---------- */
 
   const getWooLinkStatus = useCallback(
     (wooId: number): { status: LinkStatus; eposId?: number; eposName?: string; mappingId?: number } => {
-      // Check pending unlinks first
       if (pendingUnlinks[wooId]) {
         return { status: 'to-unlink', mappingId: pendingUnlinks[wooId] };
       }
-      // Check pending links
       if (pendingLinks[wooId]) {
         return { status: 'to-save', eposId: pendingLinks[wooId].eposId, eposName: pendingLinks[wooId].eposName };
       }
-      // Check saved mappings
       const mapping = wooToMapping.get(wooId);
       if (mapping) {
+        // Check if the linked ePOS product still exists
+        const eposExists = eposProducts.some((ep) => String(ep.id) === mapping.epos_id);
+        if (!eposExists && eposProducts.length > 0) {
+          return { status: 'linked-not-found', eposId: Number(mapping.epos_id), eposName: mapping.epos_name ?? undefined, mappingId: mapping.id };
+        }
         return { status: 'linked', eposId: Number(mapping.epos_id), eposName: mapping.epos_name ?? undefined, mappingId: mapping.id };
       }
       return { status: 'not-linked' };
     },
-    [pendingLinks, pendingUnlinks, wooToMapping]
+    [pendingLinks, pendingUnlinks, wooToMapping, eposProducts]
   );
 
   const getEposLinkStatus = useCallback(
@@ -222,7 +260,6 @@ export default function ProductLinksPage() {
 
   const handleLinkWoo = (wooProduct: WooProduct) => {
     if (!selectedEpos) return;
-    // Add to pending
     setPendingLinks((prev) => ({
       ...prev,
       [wooProduct.id]: {
@@ -233,7 +270,6 @@ export default function ProductLinksPage() {
         status: 'to-save',
       },
     }));
-    // Remove from pending unlinks if it was there
     setPendingUnlinks((prev) => {
       const next = { ...prev };
       delete next[wooProduct.id];
@@ -246,10 +282,8 @@ export default function ProductLinksPage() {
   const handleUnlinkWoo = (wooId: number) => {
     const mapping = wooToMapping.get(wooId);
     if (mapping) {
-      // Mark existing mapping for deletion
       setPendingUnlinks((prev) => ({ ...prev, [wooId]: mapping.id }));
     }
-    // Also remove any pending link for this woo product
     setPendingLinks((prev) => {
       const next = { ...prev };
       delete next[wooId];
@@ -275,7 +309,6 @@ export default function ProductLinksPage() {
     setError('');
     setSuccessMsg('');
     try {
-      // Save new links
       for (const link of Object.values(pendingLinks)) {
         const res = await fetch('/api/mappings', {
           method: 'POST',
@@ -293,7 +326,6 @@ export default function ProductLinksPage() {
         }
       }
 
-      // Delete unlinked mappings
       for (const [, mappingId] of Object.entries(pendingUnlinks)) {
         const res = await fetch(`/api/mappings?id=${mappingId}`, { method: 'DELETE' });
         if (!res.ok) {
@@ -312,7 +344,7 @@ export default function ProductLinksPage() {
       const parts: string[] = [];
       if (savedCount) parts.push(`${savedCount} linked`);
       if (removedCount) parts.push(`${removedCount} unlinked`);
-      setSuccessMsg(`✓ Saved successfully — ${parts.join(', ')}`);
+      setSuccessMsg(`Saved successfully — ${parts.join(', ')}`);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -320,9 +352,9 @@ export default function ProductLinksPage() {
     }
   };
 
-  /* ---------- auto-match ---------- */
+  /* ---------- auto-match (mirrors Slynk logic) ---------- */
 
-  const handleAutoMatch = (matchBy: 'name' | 'sku') => {
+  const runAutoMatch = (option: AutoMatchOption, overwriteExisting: boolean) => {
     if (eposProducts.length === 0 || wooProducts.length === 0) return;
     setAutoMatching(true);
     setError('');
@@ -330,170 +362,260 @@ export default function ProductLinksPage() {
 
     const existingWooLinked = new Set<number>();
     const existingEposLinked = new Set<string>();
-    mappings.forEach((m) => {
-      existingWooLinked.add(m.woo_id);
-      existingEposLinked.add(m.epos_id);
-    });
-    // Also exclude already-pending links
-    Object.values(pendingLinks).forEach((p) => {
-      existingWooLinked.add(p.wooId);
-      existingEposLinked.add(String(p.eposId));
+    if (!overwriteExisting) {
+      mappings.forEach((m) => {
+        existingWooLinked.add(m.woo_id);
+        existingEposLinked.add(m.epos_id);
+      });
+      Object.values(pendingLinks).forEach((p) => {
+        existingWooLinked.add(p.wooId);
+        existingEposLinked.add(String(p.eposId));
+      });
+    }
+
+    // Build ePOS lookup keyed by the chosen field
+    const eposLookup = new Map<string, EposProduct>();
+    eposProducts.forEach((ep) => {
+      if (!overwriteExisting && existingEposLinked.has(String(ep.id))) return;
+      const val = String(ep[option.eposKey] ?? '').toLowerCase().trim();
+      if (val) eposLookup.set(val, ep);
     });
 
     const newLinks: Record<number, PendingLink> = {};
     let matchCount = 0;
 
-    if (matchBy === 'name') {
-      // Build ePOS name lookup (lowercase -> product) — skip already linked
-      const eposNameMap = new Map<string, EposProduct>();
-      eposProducts.forEach((ep) => {
-        if (!existingEposLinked.has(String(ep.id))) {
-          eposNameMap.set(ep.name.toLowerCase().trim(), ep);
-        }
-      });
-
-      wooProducts.forEach((wp) => {
-        if (existingWooLinked.has(wp.id)) return;
-        const match = eposNameMap.get(wp.name.toLowerCase().trim());
-        if (match) {
-          newLinks[wp.id] = {
-            wooId: wp.id,
-            eposId: match.id,
-            eposName: match.name,
-            wooName: wp.name,
-            status: 'to-save',
-          };
-          existingWooLinked.add(wp.id);
-          existingEposLinked.add(String(match.id));
-          matchCount++;
-        }
-      });
-    } else {
-      // Match by WooCommerce SKU against ePOS barcode or "epos-{id}"
-      const eposBarcodeMap = new Map<string, EposProduct>();
-      const eposIdMap = new Map<string, EposProduct>();
-      eposProducts.forEach((ep) => {
-        if (existingEposLinked.has(String(ep.id))) return;
-        if (ep.barcode) eposBarcodeMap.set(ep.barcode.toLowerCase().trim(), ep);
-        eposIdMap.set(`epos-${ep.id}`, ep);
-      });
-
-      wooProducts.forEach((wp) => {
-        if (existingWooLinked.has(wp.id) || !wp.sku) return;
-        const skuLower = wp.sku.toLowerCase().trim();
-        const match = eposBarcodeMap.get(skuLower) ?? eposIdMap.get(skuLower);
-        if (match) {
-          newLinks[wp.id] = {
-            wooId: wp.id,
-            eposId: match.id,
-            eposName: match.name,
-            wooName: wp.name,
-            status: 'to-save',
-          };
-          existingWooLinked.add(wp.id);
-          existingEposLinked.add(String(match.id));
-          matchCount++;
-        }
-      });
-    }
+    wooProducts.forEach((wp) => {
+      if (!overwriteExisting && existingWooLinked.has(wp.id)) return;
+      const val = String(wp[option.wooKey] ?? '').toLowerCase().trim();
+      if (!val) return;
+      const match = eposLookup.get(val);
+      if (match) {
+        newLinks[wp.id] = {
+          wooId: wp.id,
+          eposId: match.id,
+          eposName: match.name,
+          wooName: wp.name,
+          status: 'to-save',
+        };
+        existingWooLinked.add(wp.id);
+        existingEposLinked.add(String(match.id));
+        // Remove from lookup so one ePOS product only matches one WC product
+        eposLookup.delete(val);
+        matchCount++;
+      }
+    });
 
     setPendingLinks((prev) => ({ ...prev, ...newLinks }));
     setAutoMatching(false);
 
     if (matchCount > 0) {
-      setSuccessMsg(`Auto-matched ${matchCount} product${matchCount > 1 ? 's' : ''} by ${matchBy}. Click "Save All" to confirm.`);
+      setSuccessMsg(`Auto-matched ${matchCount} product${matchCount > 1 ? 's' : ''} by ${option.label}. Click "Save All" to confirm.`);
     } else {
-      setSuccessMsg(`No new matches found by ${matchBy}.`);
+      setSuccessMsg(`No new matches found by ${option.label}.`);
     }
   };
 
-  /* ---------- filtered lists ---------- */
+  const handleUnlinkAll = () => {
+    if (!confirm('Are you sure you want to unlink ALL products? This will mark all existing links for removal.')) return;
+
+    const newUnlinks: Record<number, number> = {};
+    mappings.forEach((m) => {
+      newUnlinks[m.woo_id] = m.id;
+    });
+    setPendingUnlinks((prev) => ({ ...prev, ...newUnlinks }));
+    // Also clear any pending links
+    setPendingLinks({});
+    setSuccessMsg(`${Object.keys(newUnlinks).length} product(s) marked for unlinking. Click "Save All" to confirm.`);
+  };
+
+  /* ---------- sorting helpers ---------- */
+
+  function toggleEposSort(col: keyof EposProduct) {
+    if (eposSortCol === col) setEposSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    else { setEposSortCol(col); setEposSortDir('asc'); }
+  }
+
+  function toggleWooSort(col: keyof WooProduct) {
+    if (wooSortCol === col) setWooSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    else { setWooSortCol(col); setWooSortDir('asc'); }
+  }
+
+  function sortIndicator(active: boolean, dir: 'asc' | 'desc') {
+    if (!active) return null;
+    return <span className="ml-0.5 text-[10px]">{dir === 'asc' ? '▲' : '▼'}</span>;
+  }
+
+  /* ---------- filtered & sorted lists ---------- */
 
   const filteredEpos = useMemo(() => {
     const q = searchEpos.toLowerCase();
-    return eposProducts.filter(
+    const filtered = eposProducts.filter(
       (p) =>
         p.name.toLowerCase().includes(q) ||
         String(p.id).includes(q) ||
-        (p.barcode && p.barcode.toLowerCase().includes(q))
+        (p.barcode && p.barcode.toLowerCase().includes(q)) ||
+        (p.sku && p.sku.toLowerCase().includes(q)) ||
+        (p.orderCode && p.orderCode.toLowerCase().includes(q))
     );
-  }, [eposProducts, searchEpos]);
+    return filtered.sort((a, b) => {
+      const aVal = String(a[eposSortCol] ?? '').toLowerCase();
+      const bVal = String(b[eposSortCol] ?? '').toLowerCase();
+      const cmp = aVal < bVal ? -1 : aVal > bVal ? 1 : 0;
+      return eposSortDir === 'asc' ? cmp : -cmp;
+    });
+  }, [eposProducts, searchEpos, eposSortCol, eposSortDir]);
 
   const filteredWoo = useMemo(() => {
     const q = searchWoo.toLowerCase();
-    return wooProducts
-      .filter((p) => {
-        if (!p.name.toLowerCase().includes(q) && !String(p.id).includes(q) && !(p.sku && p.sku.toLowerCase().includes(q))) {
-          return false;
-        }
-        if (filterLinked === 'linked') {
-          const { status } = getWooLinkStatus(p.id);
-          return status === 'linked' || status === 'to-save';
-        }
-        if (filterLinked === 'unlinked') {
-          const { status } = getWooLinkStatus(p.id);
-          return status === 'not-linked' || status === 'to-unlink';
-        }
-        return true;
-      });
-  }, [wooProducts, searchWoo, filterLinked, getWooLinkStatus]);
+    const filtered = wooProducts.filter((p) => {
+      if (
+        !p.name.toLowerCase().includes(q) &&
+        !String(p.id).includes(q) &&
+        !(p.sku && p.sku.toLowerCase().includes(q))
+      ) {
+        return false;
+      }
+      if (filterLinked === 'linked') {
+        const { status } = getWooLinkStatus(p.id);
+        return status === 'linked' || status === 'to-save' || status === 'linked-not-found';
+      }
+      if (filterLinked === 'unlinked') {
+        const { status } = getWooLinkStatus(p.id);
+        return status === 'not-linked' || status === 'to-unlink';
+      }
+      return true;
+    });
+    return filtered.sort((a, b) => {
+      const aVal = String(a[wooSortCol] ?? '').toLowerCase();
+      const bVal = String(b[wooSortCol] ?? '').toLowerCase();
+      const cmp = aVal < bVal ? -1 : aVal > bVal ? 1 : 0;
+      return wooSortDir === 'asc' ? cmp : -cmp;
+    });
+  }, [wooProducts, searchWoo, filterLinked, getWooLinkStatus, wooSortCol, wooSortDir]);
 
   /* ---------- render ---------- */
+
+  const SortableHeader = ({
+    label,
+    colKey,
+    table,
+    className = '',
+  }: {
+    label: string;
+    colKey: string;
+    table: 'epos' | 'woo';
+    className?: string;
+  }) => {
+    const isEpos = table === 'epos';
+    const active = isEpos ? eposSortCol === colKey : wooSortCol === colKey;
+    const dir = isEpos ? eposSortDir : wooSortDir;
+    return (
+      <th
+        className={`px-3 py-2 text-left font-medium text-slate-500 text-xs cursor-pointer select-none hover:text-slate-700 ${className}`}
+        onClick={() => isEpos ? toggleEposSort(colKey as keyof EposProduct) : toggleWooSort(colKey as keyof WooProduct)}
+      >
+        {label}{sortIndicator(active, dir)}
+      </th>
+    );
+  };
 
   return (
     <div className="p-8">
       {/* Header */}
-      <div className="mb-6 flex items-start justify-between gap-4">
+      <div className="mb-6 flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-2xl font-bold text-slate-800">Product Links</h1>
-          <p className="text-slate-500 mt-1">
-            Link ePOS Now products to WooCommerce products. Select an ePOS product on the left, then
-            click &quot;Link&quot; on a WooCommerce product on the right.
+          <p className="text-slate-500 mt-1 text-sm">
+            Select an ePOS Now product, then click &quot;Link&quot; on a WooCommerce product to pair them.
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {/* Auto-match dropdown */}
-          <div className="relative group">
+          <div className="relative">
             <button
               disabled={autoMatching || eposProducts.length === 0 || wooProducts.length === 0}
+              onClick={(e) => { e.stopPropagation(); setShowAutoMatchMenu((v) => !v); }}
               className="inline-flex items-center gap-2 border border-slate-200 hover:border-indigo-300 text-slate-600 font-medium px-4 py-2 rounded-lg transition-colors text-sm disabled:opacity-50"
             >
               <Wand2 className={`w-4 h-4 ${autoMatching ? 'animate-spin' : ''}`} />
               Auto-Match
+              <ChevronDown className="w-3 h-3" />
             </button>
-            <div className="absolute right-0 top-full mt-1 bg-white border border-slate-200 rounded-lg shadow-lg py-1 w-48 hidden group-hover:block z-20">
-              <button
-                onClick={() => handleAutoMatch('name')}
-                className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
-              >
-                Match by product name
-              </button>
-              <button
-                onClick={() => handleAutoMatch('sku')}
-                className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
-              >
-                Match by SKU / barcode
-              </button>
-            </div>
+            {showAutoMatchMenu && (
+              <div className="absolute right-0 top-full mt-1 bg-white border border-slate-200 rounded-lg shadow-lg py-1 w-56 z-20"
+                onClick={(e) => e.stopPropagation()}>
+                <div className="px-3 py-1.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Match by field</div>
+                {AUTO_MATCH_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    onClick={() => { setShowAutoMatchMenu(false); setShowOverwriteDialog(opt); }}
+                    className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+                <div className="border-t border-slate-100 mt-1 pt-1">
+                  <button
+                    onClick={() => { setShowAutoMatchMenu(false); handleUnlinkAll(); }}
+                    className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50"
+                  >
+                    Unlink All Products
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Save all */}
           <button
             onClick={handleSaveAll}
             disabled={!hasUnsavedChanges || saving}
-            className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white font-medium px-5 py-2 rounded-lg transition-colors text-sm"
+            className="inline-flex items-center gap-2 bg-green-600 hover:bg-green-700 disabled:bg-slate-300 text-white font-medium px-5 py-2 rounded-lg transition-colors text-sm"
           >
             <Save className="w-4 h-4" />
-            {saving ? 'Saving…' : `Save All${hasUnsavedChanges ? ` (${Object.keys(pendingLinks).length + Object.keys(pendingUnlinks).length})` : ''}`}
+            {saving ? 'Saving…' : `Save All${hasUnsavedChanges ? ` (${pendingCount})` : ''}`}
           </button>
         </div>
       </div>
+
+      {/* Overwrite dialog */}
+      {showOverwriteDialog && (
+        <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center" onClick={() => setShowOverwriteDialog(null)}>
+          <div className="bg-white rounded-xl shadow-xl p-6 max-w-md mx-4" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-slate-800 mb-2">Find Matches — {showOverwriteDialog.label}</h3>
+            <p className="text-sm text-slate-600 mb-4">
+              Overwrite existing product links if a new match is found?
+              We recommend finding new matches only as this is much faster.
+            </p>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => { const opt = showOverwriteDialog; setShowOverwriteDialog(null); runAutoMatch(opt, false); }}
+                className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700"
+              >
+                New Matches Only
+              </button>
+              <button
+                onClick={() => { const opt = showOverwriteDialog; setShowOverwriteDialog(null); runAutoMatch(opt, true); }}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+              >
+                Overwrite Existing
+              </button>
+              <button
+                onClick={() => setShowOverwriteDialog(null)}
+                className="px-4 py-2 border border-slate-200 text-slate-600 rounded-lg text-sm font-medium hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Unsaved changes warning */}
       {hasUnsavedChanges && (
         <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-700 flex items-center gap-2">
           <AlertTriangle className="w-4 h-4 shrink-0" />
-          You have {Object.keys(pendingLinks).length + Object.keys(pendingUnlinks).length} unsaved change(s). Click &quot;Save All&quot; to apply.
+          You have {pendingCount} unsaved change(s). Click &quot;Save All&quot; to apply.
         </div>
       )}
 
@@ -518,11 +640,16 @@ export default function ProductLinksPage() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* ──── ePOS Now Products (Left) ──── */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden flex flex-col">
-          <div className="px-4 py-3 border-b border-slate-100 bg-blue-50/50">
+          <div className="px-4 py-3 border-b border-slate-100 bg-blue-50/50 flex items-center justify-between">
             <h2 className="font-semibold text-blue-700 text-sm">
               ePOS Now Products
               <span className="ml-2 text-blue-400 font-normal">({eposProducts.length})</span>
             </h2>
+            {selectedEpos && (
+              <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-medium animate-pulse">
+                ✓ Selected: {selectedEpos.name}
+              </span>
+            )}
           </div>
 
           {/* Search + refresh */}
@@ -531,7 +658,7 @@ export default function ProductLinksPage() {
               <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
                 type="text"
-                placeholder="Search name, ID, barcode…"
+                placeholder="Search name, ID, barcode, SKU…"
                 value={searchEpos}
                 onChange={(e) => setSearchEpos(e.target.value)}
                 className="w-full pl-9 pr-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
@@ -551,6 +678,7 @@ export default function ProductLinksPage() {
           {loadingEpos ? (
             <div className="flex items-center justify-center py-16 flex-1">
               <RefreshCw className="w-5 h-5 animate-spin text-blue-400" />
+              <span className="ml-2 text-sm text-slate-400">Loading ePOS products…</span>
             </div>
           ) : filteredEpos.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-slate-400 flex-1">
@@ -560,14 +688,16 @@ export default function ProductLinksPage() {
               </p>
             </div>
           ) : (
-            <div className="overflow-y-auto flex-1" style={{ maxHeight: 'calc(100vh - 340px)' }}>
+            <div className="overflow-auto flex-1" style={{ maxHeight: 'calc(100vh - 340px)' }}>
               <table className="w-full text-sm">
                 <thead className="sticky top-0 bg-slate-50 z-10">
                   <tr className="border-b border-slate-100">
-                    <th className="px-3 py-2 text-left font-medium text-slate-500 text-xs">Product Name</th>
-                    <th className="px-3 py-2 text-left font-medium text-slate-500 text-xs w-16">ID</th>
-                    <th className="px-3 py-2 text-left font-medium text-slate-500 text-xs w-20">Price</th>
-                    <th className="px-3 py-2 text-center font-medium text-slate-500 text-xs w-20">Status</th>
+                    <SortableHeader label="Product Name" colKey="name" table="epos" />
+                    <SortableHeader label="ID" colKey="id" table="epos" className="w-16" />
+                    <SortableHeader label="SKU" colKey="sku" table="epos" className="w-20" />
+                    <SortableHeader label="Barcode" colKey="barcode" table="epos" className="w-24" />
+                    <SortableHeader label="Price" colKey="salePrice" table="epos" className="w-18" />
+                    <th className="px-3 py-2 text-center font-medium text-slate-500 text-xs w-16">Status</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -587,11 +717,12 @@ export default function ProductLinksPage() {
                             : 'hover:bg-blue-50/50'
                         }`}
                       >
-                        <td className="px-3 py-2 font-medium text-slate-700 max-w-[200px] truncate" title={p.name}>
+                        <td className="px-3 py-2 font-medium text-slate-700 max-w-[180px] truncate" title={p.name}>
                           {p.name}
-                          {p.barcode && <span className="block text-xs text-slate-400 truncate">{p.barcode}</span>}
                         </td>
                         <td className="px-3 py-2 text-slate-500 font-mono text-xs">{p.id}</td>
+                        <td className="px-3 py-2 text-slate-500 text-xs truncate max-w-[80px]" title={p.sku}>{p.sku || '—'}</td>
+                        <td className="px-3 py-2 text-slate-500 text-xs truncate max-w-[100px]" title={p.barcode}>{p.barcode || '—'}</td>
                         <td className="px-3 py-2 text-slate-600 text-xs">£{(p.salePrice ?? 0).toFixed(2)}</td>
                         <td className="px-3 py-2 text-center">
                           <StatusBadge status={linkStatus} />
@@ -657,6 +788,7 @@ export default function ProductLinksPage() {
           {loadingWoo ? (
             <div className="flex items-center justify-center py-16 flex-1">
               <RefreshCw className="w-5 h-5 animate-spin text-purple-400" />
+              <span className="ml-2 text-sm text-slate-400">Loading WooCommerce products…</span>
             </div>
           ) : filteredWoo.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-slate-400 flex-1">
@@ -666,16 +798,18 @@ export default function ProductLinksPage() {
               </p>
             </div>
           ) : (
-            <div className="overflow-y-auto flex-1" style={{ maxHeight: 'calc(100vh - 340px)' }}>
+            <div className="overflow-auto flex-1" style={{ maxHeight: 'calc(100vh - 340px)' }}>
               <table className="w-full text-sm">
                 <thead className="sticky top-0 bg-slate-50 z-10">
                   <tr className="border-b border-slate-100">
-                    <th className="px-3 py-2 text-left font-medium text-slate-500 text-xs">Product Name</th>
-                    <th className="px-3 py-2 text-left font-medium text-slate-500 text-xs w-16">ID</th>
-                    <th className="px-3 py-2 text-left font-medium text-slate-500 text-xs w-20">Price</th>
-                    <th className="px-3 py-2 text-left font-medium text-slate-500 text-xs w-28">Linked ePOS</th>
-                    <th className="px-3 py-2 text-center font-medium text-slate-500 text-xs w-20">Status</th>
-                    <th className="px-3 py-2 text-right font-medium text-slate-500 text-xs w-20">Action</th>
+                    <th className="px-3 py-2 text-center font-medium text-slate-500 text-xs w-16">Action</th>
+                    <SortableHeader label="Product Name" colKey="name" table="woo" />
+                    <SortableHeader label="ID" colKey="id" table="woo" className="w-14" />
+                    <SortableHeader label="SKU" colKey="sku" table="woo" className="w-20" />
+                    <SortableHeader label="Type" colKey="type" table="woo" className="w-16" />
+                    <SortableHeader label="Status" colKey="status" table="woo" className="w-16" />
+                    <th className="px-3 py-2 text-left font-medium text-slate-500 text-xs w-32">Linked EPN</th>
+                    <th className="px-3 py-2 text-center font-medium text-slate-500 text-xs w-20">Link Status</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -689,16 +823,67 @@ export default function ProductLinksPage() {
                             ? 'bg-cyan-50/50'
                             : linkInfo.status === 'to-unlink'
                               ? 'bg-yellow-50/50'
-                              : 'hover:bg-slate-50'
+                              : linkInfo.status === 'linked-not-found'
+                                ? 'bg-red-50/30'
+                                : 'hover:bg-slate-50'
                         }`}
                       >
+                        {/* Action / Link-Unlink button */}
+                        <td className="px-3 py-2 text-center">
+                          {linkInfo.status === 'to-save' || linkInfo.status === 'to-unlink' ? (
+                            <button
+                              onClick={() => handleCancelPending(p.id)}
+                              className="text-[11px] text-slate-500 hover:text-slate-700 font-medium border border-slate-200 rounded px-2 py-0.5"
+                            >
+                              Undo
+                            </button>
+                          ) : linkInfo.status === 'linked' || linkInfo.status === 'linked-not-found' ? (
+                            <button
+                              onClick={() => handleUnlinkWoo(p.id)}
+                              className="inline-flex items-center gap-1 text-[11px] text-red-500 hover:text-red-700 font-medium border border-red-200 rounded px-2 py-0.5 hover:bg-red-50"
+                            >
+                              <Unlink className="w-3 h-3" />
+                              Unlink
+                            </button>
+                          ) : selectedEpos ? (
+                            <button
+                              onClick={() => handleLinkWoo(p)}
+                              className="inline-flex items-center gap-1 text-[11px] text-indigo-600 hover:text-indigo-800 font-medium border border-indigo-200 rounded px-2 py-0.5 hover:bg-indigo-50"
+                            >
+                              <Link2 className="w-3 h-3" />
+                              Link
+                            </button>
+                          ) : (
+                            <span className="text-[10px] text-slate-300">—</span>
+                          )}
+                        </td>
                         <td className="px-3 py-2 font-medium text-slate-700 max-w-[180px] truncate" title={p.name}>
                           {p.name}
-                          {p.sku && <span className="block text-xs text-slate-400 truncate">SKU: {p.sku}</span>}
+                          {p.parentName && (
+                            <span className="block text-[10px] text-slate-400 truncate">Parent: {p.parentName}</span>
+                          )}
                         </td>
                         <td className="px-3 py-2 text-slate-500 font-mono text-xs">{p.id}</td>
-                        <td className="px-3 py-2 text-slate-600 text-xs">£{parseFloat(p.regularPrice || '0').toFixed(2)}</td>
-                        <td className="px-3 py-2 text-xs text-slate-500 truncate max-w-[120px]" title={linkInfo.eposName ?? ''}>
+                        <td className="px-3 py-2 text-slate-500 text-xs truncate max-w-[80px]" title={p.sku}>{p.sku || '—'}</td>
+                        <td className="px-3 py-2 text-xs">
+                          <span className={`inline-block px-1.5 py-0 rounded text-[10px] font-medium ${
+                            p.type === 'variation' ? 'bg-violet-100 text-violet-600'
+                            : p.type === 'variable' ? 'bg-orange-100 text-orange-600'
+                            : 'bg-slate-100 text-slate-500'
+                          }`}>
+                            {p.type}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-xs">
+                          <span className={`inline-block px-1.5 py-0 rounded text-[10px] font-medium ${
+                            p.status === 'publish' ? 'bg-green-100 text-green-600'
+                            : p.status === 'draft' ? 'bg-yellow-100 text-yellow-600'
+                            : 'bg-slate-100 text-slate-500'
+                          }`}>
+                            {p.status}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-xs text-slate-500 truncate max-w-[130px]" title={linkInfo.eposName ?? ''}>
                           {linkInfo.eposName ? (
                             <span>
                               {linkInfo.eposName}
@@ -711,34 +896,6 @@ export default function ProductLinksPage() {
                         <td className="px-3 py-2 text-center">
                           <StatusBadge status={linkInfo.status} />
                         </td>
-                        <td className="px-3 py-2 text-right">
-                          {linkInfo.status === 'to-save' || linkInfo.status === 'to-unlink' ? (
-                            <button
-                              onClick={() => handleCancelPending(p.id)}
-                              className="text-xs text-slate-500 hover:text-slate-700 font-medium"
-                            >
-                              Undo
-                            </button>
-                          ) : linkInfo.status === 'linked' ? (
-                            <button
-                              onClick={() => handleUnlinkWoo(p.id)}
-                              className="inline-flex items-center gap-1 text-xs text-red-500 hover:text-red-700 font-medium"
-                            >
-                              <Unlink className="w-3 h-3" />
-                              Unlink
-                            </button>
-                          ) : selectedEpos ? (
-                            <button
-                              onClick={() => handleLinkWoo(p)}
-                              className="inline-flex items-center gap-1 text-xs text-indigo-600 hover:text-indigo-800 font-medium"
-                            >
-                              <Link2 className="w-3 h-3" />
-                              Link
-                            </button>
-                          ) : (
-                            <span className="text-xs text-slate-300">Select ePOS ←</span>
-                          )}
-                        </td>
                       </tr>
                     );
                   })}
@@ -749,7 +906,7 @@ export default function ProductLinksPage() {
         </div>
       </div>
 
-      {/* ──── Current Links Summary ──── */}
+      {/* ──── Saved Links Summary ──── */}
       <div className="mt-6 bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
           <h2 className="font-semibold text-slate-700">

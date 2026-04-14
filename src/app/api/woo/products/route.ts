@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server';
-import { getWooProducts } from '@/services/wooService';
+import { getWooProductsWithVariants } from '@/services/wooService';
 
 export async function GET() {
   try {
-    const products = await getWooProducts();
+    const products = await getWooProductsWithVariants();
     const cleaned = products.map((p) => ({
       id: p.id,
       name: p.name,
@@ -14,6 +14,8 @@ export async function GET() {
       stockStatus: p.stock_status ?? '',
       type: p.type ?? 'simple',
       status: p.status ?? '',
+      parentId: p.parent_id ?? null,
+      parentName: p.parent_name ?? null,
     }));
     return NextResponse.json({ products: cleaned });
   } catch (err) {

@@ -16,6 +16,20 @@ export interface WooProduct {
   stock_status?: string;
   categories?: { id: number; name?: string }[];
   meta_data?: { key: string; value: string }[];
+  attributes?: { name: string; option: string }[];
+  parent_id?: number;
+  parent_name?: string;
+}
+
+export interface WooVariation {
+  id?: number;
+  sku?: string;
+  regular_price?: string;
+  sale_price?: string;
+  manage_stock?: boolean;
+  stock_quantity?: number | null;
+  stock_status?: string;
+  attributes?: { name: string; option: string }[];
 }
 
 export interface WooOrder {
@@ -77,6 +91,58 @@ async function getAllPages<T>(endpoint: string, params: Record<string, unknown> 
 
 export async function getWooProducts(): Promise<WooProduct[]> {
   return getAllPages<WooProduct>('products');
+}
+
+export async function getWooProductVariations(productId: number): Promise<WooVariation[]> {
+  return getAllPages<WooVariation>(`products/${productId}/variations`);
+}
+
+/** Fetches all products including individual variations for variable products. */
+export async function getWooProductsWithVariants(): Promise<WooProduct[]> {
+  const products = await getWooProducts();
+  const result: WooProduct[] = [];
+
+  const variableProducts = products.filter((p) => p.type === 'variable');
+  const nonVariableProducts = products.filter((p) => p.type !== 'variable');
+
+  // Add all non-variable products as-is
+  result.push(...nonVariableProducts);
+
+  // Fetch variations for each variable product (in parallel, batches of 5)
+  for (let i = 0; i < variableProducts.length; i += 5) {
+    const batch = variableProducts.slice(i, i + 5);
+    const variationBatches = await Promise.all(
+      batch.map(async (parent) => {
+        try {
+          const variations = await getWooProductVariations(parent.id!);
+          return variations.map((v) => {
+            const attrLabel = v.attributes?.map((a) => a.option).join(' / ') || '';
+            return {
+              id: v.id,
+              name: attrLabel ? `${parent.name} — ${attrLabel}` : parent.name,
+              type: 'variation' as const,
+              status: parent.status,
+              sku: v.sku,
+              regular_price: v.regular_price,
+              sale_price: v.sale_price,
+              manage_stock: v.manage_stock,
+              stock_quantity: v.stock_quantity,
+              stock_status: v.stock_status,
+              attributes: v.attributes,
+              parent_id: parent.id,
+              parent_name: parent.name,
+            } satisfies WooProduct;
+          });
+        } catch {
+          // If fetching variations fails, include the parent product itself
+          return [parent];
+        }
+      })
+    );
+    result.push(...variationBatches.flat());
+  }
+
+  return result;
 }
 
 export async function getWooProduct(id: number): Promise<WooProduct> {

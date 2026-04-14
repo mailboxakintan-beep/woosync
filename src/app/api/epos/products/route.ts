@@ -13,7 +13,10 @@ export async function GET() {
         description: p.Description ?? '',
         salePrice: p.SalePrice,
         costPrice: p.CostPrice ?? 0,
+        sku: p.Sku ?? '',
         barcode: p.Barcode ?? '',
+        orderCode: p.OrderCode ?? '',
+        articleCode: p.ArticleCode ?? '',
         categoryId: p.CategoryId ?? null,
       }));
     return NextResponse.json({ products: cleaned });

@@ -7,7 +7,10 @@ export interface EposProduct {
   Description?: string;
   SalePrice: number;
   CostPrice?: number;
+  Sku?: string;
   Barcode?: string;
+  OrderCode?: string;
+  ArticleCode?: string;
   CategoryId?: number;
   TaxRateId?: number;
   IsDeleted?: boolean;
